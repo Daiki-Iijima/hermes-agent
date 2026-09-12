@@ -2545,7 +2545,23 @@ def complete_task(
     if not _parents_satisfied(conn, task_id):
         return False
     from hermes_cli.kanban_pr_acceptance_store import prepare_acceptance, record_acceptance
-    verified_cards = _gate_created_cards(conn, task_id, created_cards, summary or result)
+    validation_error = None
+    with write_txn(conn):
+        if expected_run_id is not None:
+            owner = conn.execute(
+                "SELECT 1 FROM tasks WHERE id = ? AND current_run_id = ? "
+                "AND status IN ('running', 'ready', 'blocked', 'review')",
+                (task_id, int(expected_run_id)),
+            ).fetchone()
+            if owner is None:
+                return False
+        try:
+            verified_cards = _gate_created_cards(conn, task_id, created_cards, summary or result)
+        except HallucinatedCardsError as exc:
+            # Commit the active owner's audit before reporting invalid cards.
+            validation_error = exc
+    if validation_error is not None:
+        raise validation_error
     metadata = _merge_completion_prose_artifacts(
         conn, task_id, metadata, summary=summary, result=result,
     )
@@ -2620,22 +2636,20 @@ _REVIEW_APPROVED_NOTE = "Review approved without additional evidence."
 def _gate_created_cards(
     conn: sqlite3.Connection, task_id: str, created_cards: Optional[Iterable[str]], preview_text: Optional[str],
 ) -> list[str]:
-    """Verify ``created_cards`` BEFORE the main write txn; returns the verified
-    ids. A phantom id is recorded in its own tiny txn (auditable) then raised
-    as :class:`HallucinatedCardsError` without touching task state."""
+    """Validate under complete_task's ownership transaction; the caller commits
+    the audit before propagating :class:`HallucinatedCardsError`."""
     if not created_cards:
         return []
     verified_cards, phantom_cards = _verify_created_cards(conn, task_id, created_cards)
     if phantom_cards:
-        with write_txn(conn):
-            _append_event(
-                conn, task_id, "completion_blocked_hallucination",
-                {
-                    "phantom_cards": phantom_cards,
-                    "verified_cards": verified_cards,
-                    "summary_preview": _first_line(preview_text, 200) or None,
-                },
-            )
+        _append_event(
+            conn, task_id, "completion_blocked_hallucination",
+            {
+                "phantom_cards": phantom_cards,
+                "verified_cards": verified_cards,
+                "summary_preview": _first_line(preview_text, 200) or None,
+            },
+        )
         raise HallucinatedCardsError(phantom_cards, task_id)
     return verified_cards
 
