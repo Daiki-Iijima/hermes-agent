@@ -111,6 +111,8 @@ export function ModelMenuPanel({
         sessionId: activeSessionId
       })
 
+      // The refreshed catalog is a hint list, never a reason to move the pick:
+      // a custom slug the row lacks is still what the user selected.
       queryClient.setQueryData<ModelOptionsResponse>(queryKey, next)
 
       // Group / credential swaps can return a catalog that no longer contains

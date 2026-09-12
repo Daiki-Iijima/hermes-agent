@@ -92,6 +92,29 @@ export function reconcileSelectionAfterCatalogRefresh(
   return next
 }
 
+type CatalogProviderIdentity = Pick<ModelOptionProvider, 'aliases' | 'name' | 'slug'>
+
+/** True when `currentProvider` is this catalog row — slug, display name, or
+ *  a custom-provider alias (`custom:<key>` vs the bare config key, #87035). */
+export function catalogProviderMatches(provider: CatalogProviderIdentity, currentProvider: string): boolean {
+  if (!currentProvider) {
+    return false
+  }
+
+  return (
+    provider.slug === currentProvider ||
+    provider.name === currentProvider ||
+    (provider.aliases?.includes(currentProvider) ?? false)
+  )
+}
+
+// A picked (provider, model) pair is never retargeted from catalog membership.
+// Picker rows are hints (discovered / curated / capped lists); a custom endpoint
+// or a newer release legitimately serves ids the row lacks, and the backend
+// soft-accepts them. Diffing the pick against the catalog silently swapped
+// `deepseek-v4.1-flash` for the row's `-0731` sibling. The only authority on a
+// pick's validity is the gateway's switch result.
+
 interface ModelOptionsRequest {
   /** When false, include ambient/unconfigured providers (onboarding/setup
    *  surfaces). Chat pickers default to true so only explicitly configured

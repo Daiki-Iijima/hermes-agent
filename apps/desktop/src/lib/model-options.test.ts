@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { getGlobalModelOptions } from '@/hermes'
 
 import {
+  catalogProviderMatches,
   firstSelectableCatalogModel,
   manualPickRemoved,
   modelOptionsQueryKey,
@@ -283,5 +284,21 @@ describe('reconcileSelectionAfterCatalogRefresh', () => {
     expect(reconcileSelectionAfterCatalogRefresh('glm-4.5-air', [moa])).toBeNull()
     expect(reconcileSelectionAfterCatalogRefresh('glm-4.5-air', [])).toBeNull()
     expect(reconcileSelectionAfterCatalogRefresh('glm-4.5-air', undefined)).toBeNull()
+  })
+})
+
+describe('catalogProviderMatches', () => {
+  const cloudflare = {
+    aliases: ['custom:cloudflare', 'cloudflare'],
+    models: ['@cf/meta/llama-3.3-70b-instruct-fp8-fast'],
+    name: 'Cloudflare',
+    slug: 'cloudflare'
+  }
+
+  it('matches slug, display name, and custom-provider aliases', () => {
+    expect(catalogProviderMatches(cloudflare, 'cloudflare')).toBe(true)
+    expect(catalogProviderMatches(cloudflare, 'Cloudflare')).toBe(true)
+    expect(catalogProviderMatches(cloudflare, 'custom:cloudflare')).toBe(true)
+    expect(catalogProviderMatches(cloudflare, 'openrouter')).toBe(false)
   })
 })
