@@ -27,7 +27,8 @@ from hermes_cli.kanban_db_graph import decompose_triage_task
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import profiles as profiles_mod
 from hermes_cli.kanban_specify import (
-    _call_aux, _extract_json_blob, _load_triage_task, _task_prompt_fields, _title_body,
+    _call_aux, _extract_json_blob, _is_aux_triage_candidate, _load_triage_task,
+    _task_prompt_fields, _title_body,
 )
 from hermes_cli.kanban_specify import _profile_author as _specify_author
 
@@ -336,7 +337,7 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     """Return task ids currently in the triage column."""
     with kbc.connect_closing() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
-    return [row.id for row in rows]
+    return [row.id for row in rows if _is_aux_triage_candidate(row)]
 
 
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----

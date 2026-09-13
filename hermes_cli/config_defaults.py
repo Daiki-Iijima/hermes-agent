@@ -12,6 +12,8 @@ def _aux(timeout, *, reasoning_effort=True, **extra):
     ``extra`` keys are appended after the standard ones.
     """
     d = {"provider": "auto", "model": "", "base_url": "", "api_key": "", "timeout": timeout, "extra_body": {}}
+    # Explicit false forbids cross-provider recovery, including capacity errors.
+    d["allow_provider_fallback"] = True
     if reasoning_effort:
         d["reasoning_effort"] = ""
     d.update(extra)
@@ -705,11 +707,12 @@ DEFAULT_CONFIG = {
         # /review reviewer: a full subagent on the async delegation rail, credentials resolved like
         # delegation.provider pins. "auto" + "" = main agent's model. api_mode forces transport:
         # chat_completions | anthropic_messages | codex_responses.
-        "review": {"provider": "auto", "model": "", "base_url": "", "api_key": "", "api_mode": ""},
+        "review": {"provider": "auto", "model": "", "base_url": "", "api_key": "", "api_mode": "", "allow_provider_fallback": True},
         "mcp": _aux(30),
         # prefer_fast_model opts in to the provider fast tier; auto otherwise = main model.
         "title_generation": {
             "enabled": True,
+            "allow_provider_fallback": True,
             # Note: session_search no longer uses an auxiliary LLM (PR #27590 — single-shape tool returns DB
             # content directly). The old ``auxiliary.session_search.*`` block was removed here. Existing
             # values in user config.yaml files are harmless leftovers and ignored.
