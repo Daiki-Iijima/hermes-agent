@@ -4003,29 +4003,64 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
 
     The caller swallows all errors: a broken loop must never wedge a worker.
     """
+    from agent.delegation_context import is_dispatcher_owned_worker_context
+
     task_id = (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
-    if not task_id:
+    if not task_id or not is_dispatcher_owned_worker_context():
         return
     raw_run_id = (os.environ.get("HERMES_KANBAN_RUN_ID") or "").strip()
-    worker_run_id = _int_or(raw_run_id, None) if raw_run_id else None
-    if raw_run_id and worker_run_id is None:
-        logger.warning("invalid HERMES_KANBAN_RUN_ID=%r", raw_run_id)
+    worker_run_id = _int_or(raw_run_id, None)
+    if worker_run_id is None or not 0 < worker_run_id < 2**63:
+        return
 
+    import sqlite3
+    from contextlib import closing
     from hermes_cli import kanban_db as _kb
-    from hermes_cli import kanban_db_connect as _kbc
+    from hermes_cli.sqlite_safe_read import connect_tracked
     from hermes_cli.goals import run_kanban_goal_loop as _run_loop, DEFAULT_MAX_TURNS as _DEF_TURNS
 
-    # Goal text = title + body (the acceptance criteria the judge evaluates against).
-    with _kbc.connect_closing() as conn:
-        task = _kb.get_task(conn, task_id)
+    try:
+        board = _kb._normalize_board_slug(os.environ.get("HERMES_KANBAN_BOARD"))
+        override = _kb._CURRENT_BOARD_OVERRIDE.get()
+        if not board or (override and _kb._normalize_board_slug(override) != board):
+            return
+        # Resolve once: the dispatcher DB pin wins, with no current-board fallback.
+        db_uri = _kb.kanban_db_path(board=board).resolve().as_uri()
+    except (OSError, ValueError):
+        return
+
+    def _connect(mode: str):
+        # Neither reads nor a late block may create/migrate/repair a missing board.
+        conn = connect_tracked(db_uri + f"?mode={mode}", uri=True, timeout=1, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _owned_task():
+        with closing(_connect("ro")) as conn:
+            row = conn.execute(
+                "SELECT t.* FROM tasks t JOIN task_runs r ON r.task_id = t.id "
+                "WHERE t.id = ? AND r.id = ? AND t.current_run_id = r.id "
+                "AND t.status = 'running' AND r.status = 'running' "
+                "AND r.ended_at IS NULL AND r.outcome IS NULL",
+                (task_id, worker_run_id),
+            ).fetchone()
+            return _kb.Task.from_row(row) if row else None
+
+    try:
+        task = _owned_task()
+    except (OSError, sqlite3.Error):
+        return
     if task is None:
         return
 
+    # Goal text = title + body (the acceptance criteria the judge evaluates against).
     goal_text = "\n\n".join(p for p in (task.title or "", task.body) if p).strip()
     if not goal_text:
         return
 
     def _run_turn(prompt: str) -> str:
+        if _owned_task() is None:
+            return ""
         result = cli.agent.run_conversation(user_message=prompt, conversation_history=cli.conversation_history)
         _sync_cli_session_id_from_agent(cli)
         resp = result.get("final_response", "") if isinstance(result, dict) else str(result)
@@ -4034,11 +4069,11 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
         return resp or ""
 
     def _task_status() -> "str | None":
-        with _kbc.connect_closing() as c:
-            return _kb.goal_run_status(c, task_id, worker_run_id)
+        owned = _owned_task()
+        return owned.status if owned else None
 
     def _block(reason: str) -> None:
-        with _kbc.connect_closing() as c:
+        with closing(_connect("rw")) as c:
             _kb.block_task(c, task_id, reason=reason, expected_run_id=worker_run_id)
 
     _run_loop(
