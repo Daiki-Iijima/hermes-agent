@@ -146,16 +146,16 @@ def test_human_block_triage_rows_are_not_aux_work_but_transient_triage_is(
 def test_block_loop_detected_event_emitted(kanban_home: Path) -> None:
     with kbc.connect_closing() as conn:
         tid = _running_task(conn)
-        kb.block_task(conn, tid, reason="x", kind="capability")
+        kb.block_task(conn, tid, reason="x", kind="transient")
         kb.unblock_task(conn, tid)
         _make_running_again(conn, tid)
-        kb.block_task(conn, tid, reason="x", kind="capability")
+        kb.block_task(conn, tid, reason="x", kind="transient")
         events = [e for e in kb.list_events(conn, tid)
                   if e.kind == "block_loop_detected"]
         assert events, "expected a block_loop_detected event"
         payload = events[-1].payload or {}
         assert payload.get("recurrences") == 2
-        assert payload.get("kind") == "capability"
+        assert payload.get("kind") == "transient"
 
 
 # ---------------------------------------------------------------------------
