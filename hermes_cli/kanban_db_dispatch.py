@@ -1204,15 +1204,9 @@ def check_respawn_guard(
             return "recent_success"
 
     # 4. GitHub PR URL in a recent comment — prior worker already opened a PR.
-    pr_cutoff = now - _RESPAWN_GUARD_PR_WINDOW
-    for c in conn.execute(
-        "SELECT body FROM task_comments WHERE task_id = ? AND created_at >= ?",
-        (task_id, pr_cutoff),
-    ).fetchall():
-        if c["body"] and _RESPAWN_GUARD_PR_URL_RE.search(c["body"]):
-            return "active_pr"
-
-    return None
+    from hermes_cli.kanban_db_waits import active_pr_guard
+    return active_pr_guard(conn, task_id, latest_run, now,
+                           window=_RESPAWN_GUARD_PR_WINDOW, url_re=_RESPAWN_GUARD_PR_URL_RE)
 
 
 def _profile_exists_fn() -> Optional[Callable[[str], bool]]:
