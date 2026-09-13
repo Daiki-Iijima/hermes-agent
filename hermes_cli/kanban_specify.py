@@ -131,7 +131,15 @@ def _load_triage_task(task_id: str) -> tuple[Optional[kb.Task], str]:
         return None, "unknown task id"
     if task.status != "triage":
         return None, f"task is not in triage (status={task.status!r})"
+    if not _is_aux_triage_candidate(task):
+        return None, "task is waiting for an explicit human unblock"
     return task, ""
+
+
+def _is_aux_triage_candidate(task: kb.Task) -> bool:
+    """False for legacy human waits that must not be rewritten by an LLM."""
+    from hermes_cli.kanban_db_waits import persisted_human_wait
+    return not persisted_human_wait(task.block_kind, task.block_recurrences)
 
 
 def _task_prompt_fields(task: kb.Task) -> dict[str, str]:
@@ -228,4 +236,4 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     """Task ids in the triage column; ``tenant`` narrows the sweep."""
     with kbc.connect_closing() as conn:
         tasks = kb.list_tasks(conn, status="triage", tenant=tenant, include_archived=False)
-    return [t.id for t in tasks]
+    return [t.id for t in tasks if _is_aux_triage_candidate(t)]

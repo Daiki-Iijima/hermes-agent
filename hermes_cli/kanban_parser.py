@@ -298,8 +298,9 @@ _SPECS = [
              help="Typed block reason. 'dependency' waits in todo (auto-promoted when "
                   "parents finish, no human); 'needs_input'/'capability' go to "
                   "blocked for a human; 'transient' marks a maybe-flaky failure. "
-                  "Repeated same-kind re-blocks after unblock route the task to "
-                  "triage to break unblock loops. Omit for a generic block."),
+                  "Repeated transient re-blocks route to triage for recovery; "
+                  "human waits remain blocked until explicitly unblocked. "
+                  "Omit for a generic block."),
     ], help="Mark one or more tasks blocked"),
     _cmd("schedule", [
         _TASK_ID,

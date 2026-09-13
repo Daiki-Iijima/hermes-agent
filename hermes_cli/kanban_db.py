@@ -89,11 +89,11 @@ def _git_out(cwd: Path, *args: str, timeout: int = 30) -> Optional[str]:
 VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 
-# Typed block reasons (routing in ``_route_block``); ``None`` = legacy un-typed.
+# Typed block reasons (kanban_db_waits.route_block); None = legacy un-typed.
 VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
 
-# Same-reason block -> unblock -> re-block cycles before routing to ``triage``.
-# Counts unblock recurrences, NOT dispatcher failures (``DEFAULT_FAILURE_LIMIT``).
+# Same transient block -> unblock -> re-block cycles before recovery via ``triage``.
+# Human waits remain blocked; this counts recurrences, not dispatcher failures.
 BLOCK_RECURRENCE_LIMIT = 2
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 
@@ -936,11 +936,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- the SAME kind can be recognised as a loop.
     block_kind           TEXT,
     -- Unblock-loop counter. Incremented each time a task is re-blocked for the
-    -- same truly-blocked reason after having been unblocked. When it reaches
-    -- BLOCK_RECURRENCE_LIMIT the task is routed to ``triage`` instead of
-    -- ``blocked`` so a cron can't spin it forever. Reset to 0 only on a
-    -- successful completion — NOT on unblock (resetting on unblock is exactly
-    -- the amnesia that let the loop run unbounded).
+    -- same reason after having been unblocked. Repeated transient failures use
+    -- it to route to ``triage`` for recovery; human waits remain ``blocked``
+    -- until explicitly unblocked. Reset to 0 only on successful completion.
     block_recurrences    INTEGER NOT NULL DEFAULT 0
 );
 
@@ -2908,7 +2906,7 @@ def block_task(
     kind: Optional[str] = None, expected_run_id: Optional[int] = None,
 ) -> bool:
     """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see
-    :func:`_route_block`). ``transient`` still counts toward the loop breaker
+    :func:`hermes_cli.kanban_db_waits.route_block`). ``transient`` still counts toward the loop breaker
     so a forever-flaky task escalates. True on any transition."""
     if kind is not None and kind not in VALID_BLOCK_KINDS:
         raise ValueError(f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None")
@@ -3232,17 +3230,37 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
 
 
 def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
-    """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
-    when that is where it left off), closing any leaked run first."""
+    """A parked task -> its resumable phase, parent re-gated.
+
+    Besides ``blocked``/``scheduled``, accept legacy ``triage`` rows carrying
+    persisted human-wait state so operators can explicitly release cards that
+    older recurrence handling escalated. Ordinary triage stays untouched.
+    """
     now = int(time.time())
     with write_txn(conn):
+        task_row = conn.execute(
+            "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if task_row is None:
+            return False
+        current_status = task_row["status"]
+        from hermes_cli.kanban_db_waits import persisted_human_wait
+        legacy_human_triage = (
+            current_status == "triage"
+            and persisted_human_wait(
+                task_row["block_kind"], int(task_row["block_recurrences"] or 0),
+            )
+        )
+        if current_status not in {"blocked", "scheduled"} and not legacy_human_triage:
+            return False
         resume_status = (
             _resume_status_from_events(conn, task_id)
-            if _task_status(conn, task_id) == "blocked"
+            if current_status in {"blocked", "triage"}
             else "ready"
         )
         _reclaim_dangling_run(
-            conn, task_id, statuses=("blocked", "scheduled"), now=now,
+            conn, task_id, statuses=(current_status,), now=now,
             note="invariant recovery on unblock",
         )
         # Re-gate on parent completion before restoring the source phase.
@@ -3260,7 +3278,7 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         cur = conn.execute(
             "UPDATE tasks SET status = ?, current_run_id = NULL, "
             "consecutive_failures = 0, last_failure_error = NULL "
-            "WHERE id = ? AND status IN ('blocked', 'scheduled')", (new_status, task_id),
+            "WHERE id = ? AND status = ?", (new_status, task_id, current_status),
         )
         if cur.rowcount != 1:
             return False

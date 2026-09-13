@@ -478,6 +478,80 @@ def test_active_pr_guard_skipped_for_review_lane_but_defers_ready_lane(
         ) == "rate_limit_cooldown"
 
 
+def test_changes_requested_handoff_may_continue_existing_pr(
+    kanban_home: Path,
+) -> None:
+    """A durable reviewer handoff authorizes work on the linked PR, but only
+    until a successor run owns the task."""
+    pr_comment = "Continue https://github.com/example/repo/pull/456 after review."
+
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="fix review", assignee="implementer")
+        implementation = kb.claim_task(conn, task_id, claimer="implementer")
+        assert implementation is not None
+        kb.add_comment(conn, task_id, author="implementer", body=pr_comment)
+        assert kb.request_review(
+            conn,
+            task_id,
+            summary="ready",
+            reviewer="reviewer",
+            expected_run_id=implementation.current_run_id,
+        )
+        review = kb.claim_review_task(conn, task_id, claimer="reviewer")
+        assert review is not None
+        changed, implementer = kb.request_changes(
+            conn,
+            task_id,
+            reason="please revise",
+            expected_run_id=review.current_run_id,
+        )
+        assert changed is True
+        assert implementer == "implementer"
+
+        assert kbd.check_respawn_guard(conn, task_id) is None
+
+        successor = kb.claim_task(conn, task_id, claimer="implementer-2")
+        assert successor is not None
+        assert kbd.check_respawn_guard(conn, task_id) == "active_pr"
+
+
+def test_respawn_guard_event_deduplicates_until_progress_or_reason_change(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(kbd, "_profile_exists_fn", lambda: lambda _name: True)
+    monkeypatch.setattr(kbd, "_memory_pressure_level", lambda: "ok")
+
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="already opened", assignee="worker")
+        kb.add_comment(
+            conn,
+            task_id,
+            author="worker",
+            body="Opened https://github.com/example/repo/pull/789",
+        )
+
+        kbd.dispatch_once(conn, reconcile_orphans=False)
+        kbd.dispatch_once(conn, reconcile_orphans=False)
+        guards = _events(conn, task_id, kind="respawn_guarded")
+        assert [event[1]["reason"] for event in guards] == ["active_pr"]
+
+        kb.add_comment(conn, task_id, author="operator", body="new context")
+        kbd.dispatch_once(conn, reconcile_orphans=False)
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET last_failure_error = 'authentication failed' WHERE id = ?",
+                (task_id,),
+            )
+        kbd.dispatch_once(conn, reconcile_orphans=False)
+
+        guards = _events(conn, task_id, kind="respawn_guarded")
+        assert [event[1]["reason"] for event in guards] == [
+            "active_pr",
+            "active_pr",
+            "blocker_auth",
+        ]
+
+
 def test_review_dispatch_preserves_task_skills_and_adds_reviewer_skill(
     kanban_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
