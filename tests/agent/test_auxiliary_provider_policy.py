@@ -25,3 +25,9 @@ def test_disabled_provider_fallback_does_not_resolve_a_second_client(monkeypatch
     with get_config_path().open("a") as stream:
         stream.write("    fallback_chain:\n      - provider: anthropic\n        model: fixture\n")
     assert list(provider_fallback(error, route)) == []
+    assert ac._try_configured_fallback_for_unavailable_client("compression", "openai-codex") == (None, None, "")
+
+
+def test_provider_fallback_remains_enabled_without_operator_restriction():
+    from agent.auxiliary_provider_fallback import provider_fallback_allowed
+    assert provider_fallback_allowed("compression") is True

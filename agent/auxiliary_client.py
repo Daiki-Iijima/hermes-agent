@@ -4020,6 +4020,9 @@ def _try_configured_fallback_for_unavailable_client(
 ) -> Tuple[Optional[Any], Optional[str], str]:
     """Task fallback_chain when an explicit aux provider cannot build a client (no key/OAuth/pool creds);
     stops at the per-task chain — the main-agent model stays the runtime last resort."""
+    from agent.auxiliary_provider_fallback import provider_fallback_allowed
+    if not provider_fallback_allowed(task):
+        return None, None, ""
     explicit = (failed_provider or "").strip().lower()
     if not task or not explicit or explicit in {"auto"}:
         return None, None, ""

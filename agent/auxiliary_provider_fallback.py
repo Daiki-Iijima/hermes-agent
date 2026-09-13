@@ -3,6 +3,11 @@ from __future__ import annotations
 from agent import auxiliary_client as aux
 
 
+def provider_fallback_allowed(task):
+    """A per-task operator restriction takes precedence over recovery discovery."""
+    return aux._get_auxiliary_task_config(task).get("allow_provider_fallback", True) is not False
+
+
 def provider_fallback(first_err: Exception, route: aux._LadderRoute):
     """Last rung: other providers (per-task chain; then auto: main fallback chain + discovery
     chain, explicit: main-agent-model net). Returns the response or None.
@@ -10,6 +15,8 @@ def provider_fallback(first_err: Exception, route: aux._LadderRoute):
     response) bypass the explicit-provider gate — the provider cannot serve this request
     regardless of user intent. Auth errors only fall back in auto mode."""
     task, tag, resolved_provider = route.task, route.tag, route.resolved_provider
+    if not provider_fallback_allowed(task):
+        return None
     # Respect explicit provider choice for transient errors (auth, request validation, etc.) but allow
     # fallback when the provider clearly cannot serve the request due to capacity: payment/quota exhaustion
     # and connection failures are capacity problems, not request constraints. See #26803: daily token quota
