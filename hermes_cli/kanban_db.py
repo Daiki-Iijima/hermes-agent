@@ -1032,7 +1032,25 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
 );
 
+-- Ordered, verifiable steps per task (hermes_cli/kanban_db_checklist.py).
+-- ``kind`` separates agent judgement work ('ai') from mechanical build/test/
+-- deploy steps ('machine'); ``done_at`` NULL = unchecked. Positions are dense
+-- 1-based. New table (not a column) so ``CREATE TABLE IF NOT EXISTS`` upgrades
+-- existing boards without an ALTER pass.
+CREATE TABLE IF NOT EXISTS task_checklist_items (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id    TEXT NOT NULL,
+    position   INTEGER NOT NULL,
+    text       TEXT NOT NULL,
+    kind       TEXT NOT NULL DEFAULT 'ai' CHECK (kind IN ('ai', 'machine')),
+    done_at    INTEGER,
+    done_by    TEXT,
+    evidence   TEXT,
+    created_at INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status ON tasks(assignee, status);
+CREATE INDEX IF NOT EXISTS idx_checklist_task        ON task_checklist_items(task_id, position);
 CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
 CREATE INDEX IF NOT EXISTS idx_links_parent          ON task_links(parent_id);
@@ -1230,6 +1248,7 @@ def create_task(
     project_source_task_id: Optional[str] = None,
     creator_task_id: Optional[str] = None,
     completion_contract: Optional[str] = None,
+    checklist: Optional[Iterable[Any]] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
@@ -1245,10 +1264,14 @@ def create_task(
     in the active profile's projects.db — see ``_resolve_project_link``.
     ``workspace_kind=None`` (omitted) inherits a project-scoped board's project;
     an explicit ``"scratch"`` or ``project_id=""`` is a request for no project.
+    ``checklist``: ``"kind:text"`` strings or ``{"text", "kind"}`` dicts (validated
+    up front; see ``kanban_db_checklist``).
     """
+    from hermes_cli import kanban_db_checklist as kbcl
     from hermes_cli.kanban_db_graph import initial_task_state, inherit_creator_origin
     from hermes_cli.kanban_pr_acceptance import validate_contract
 
+    checklist_items = kbcl.normalize_items(checklist)
     completion_contract = validate_contract(completion_contract)
     model_override, provider_override = _validate_model_override(model_override, provider_override)
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)
@@ -1364,6 +1387,7 @@ def create_task(
                         "provider_override": provider_override,
                     },
                 )
+                kbcl.insert_initial_items(conn, task_id, checklist_items, by=created_by)
                 # ACK-edge: the originating channel hears a child BLOCK, not just the fan-in.
                 inherit_creator_origin(conn, task_id, creator_task_id, created_at=now)
                 _inherit_notify_subs(conn, task_id, parents, created_at=now)
@@ -2619,6 +2643,9 @@ def complete_task(
             _completed_event_payload(result, event_summary, verified_cards, metadata),
             run_id=run_id,
         )
+        # Checklist rule: never blocks completion, but unchecked items are noted.
+        from hermes_cli.kanban_db_checklist import note_unchecked_on_complete
+        note_unchecked_on_complete(conn, task_id, run_id, now)
     _flag_phantom_prose_refs(conn, task_id, run_id, summary, result, verified_cards)
     # Success wipes the breaker counter (history stays on the event log).
     _clear_failure_counter(conn, task_id)
@@ -3441,13 +3468,19 @@ def invalidate_descendants_for_parent_reopen(
 def specify_triage_task(
     conn: sqlite3.Connection, task_id: str, *, title: Optional[str] = None,
     body: Optional[str] = None, assignee: Optional[str] = None, author: Optional[str] = None,
+    checklist: Optional[Iterable[Any]] = None,
 ) -> bool:
     """Update title/body/assignee (when given) and move ``triage -> todo`` in one
     txn; False when not in triage. Lands in ``todo`` (not ``ready``) so parent
     gating still applies; the audit comment is written only when a field changed.
+    ``checklist`` is stored in the same txn only when the task has none yet (a
+    human-authored checklist is never replaced by the specifier).
     """
+    from hermes_cli import kanban_db_checklist as kbcl
+
     if title is not None and not title.strip():
         raise ValueError("title cannot be blank")
+    checklist_items = kbcl.normalize_items(checklist)
     assignee = _canonical_assignee(assignee)
     with write_txn(conn):
         existing = conn.execute(
@@ -3478,6 +3511,9 @@ def specify_triage_task(
         )
         if cur.rowcount != 1:
             return False
+        if checklist_items and not kbcl.list_items(conn, task_id):
+            kbcl.insert_initial_items(conn, task_id, checklist_items, by=author)
+            changed_fields.append("checklist")
         if changed_fields and author and author.strip():
             # Not add_comment (own txn + 'commented' event); 'specified' below records it.
             _insert_comment(
@@ -3520,7 +3556,7 @@ def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
 def _delete_task_relations(conn: sqlite3.Connection, task_id: str) -> None:
     """Delete every row referencing ``task_id`` (schema has no ON DELETE CASCADE)."""
     conn.execute("DELETE FROM task_links WHERE parent_id = ? OR child_id = ?", (task_id, task_id))
-    for table in ("task_comments", "task_events", "task_runs", "kanban_notify_subs"):
+    for table in ("task_comments", "task_events", "task_runs", "kanban_notify_subs", "task_checklist_items"):
         conn.execute(f"DELETE FROM {table} WHERE task_id = ?", (task_id,))
 
 
@@ -3587,8 +3623,11 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
         raise ValueError(f"unknown task {task_id}")
     # One clock reading so every relative age in this rendering agrees.
     now = int(time.time())
+    from hermes_cli.kanban_db_checklist import list_items, render_context_lines
+
     lines: list[str] = []
     _ctx_header(lines, task)
+    lines.extend(render_context_lines(list_items(conn, task_id)))
     _ctx_attachments(lines, list_attachments(conn, task_id))
     _ctx_prior_attempts(lines, conn, task_id, now)
     _ctx_parent_results(lines, conn, task_id, now)

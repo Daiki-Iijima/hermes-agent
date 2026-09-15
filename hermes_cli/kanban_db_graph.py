@@ -210,5 +210,8 @@ def _insert_decomposed_child(
     _append_event(
         conn, new_id, "created", {"by": author or "decomposer", "from_decompose_of": root_id},
     )
+    if child.get("checklist"):
+        from hermes_cli import kanban_db_checklist as kbcl
+        kbcl.insert_initial_items(conn, new_id, kbcl.normalize_items(child["checklist"]), by=author or "decomposer")
     inherit_creator_origin(conn, new_id, root_id, created_at=now)
     return new_id

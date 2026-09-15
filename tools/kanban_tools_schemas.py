@@ -348,6 +348,39 @@ KANBAN_ATTACHMENTS_SCHEMA = _schema(
     [],
 )
 
+_CHECKLIST_ITEM_PROPS = {
+    "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
+    "item": _prop("integer", "1-based checklist position, as numbered in the checklist."),
+    "item_id": _prop("integer", "Checklist item id (alternative to item)."),
+}
+
+KANBAN_CHECKLIST_SCHEMA = _schema(
+    "kanban_checklist",
+    "Show a task's checklist (ordered steps tagged ai or machine) with done/total progress.",
+    {"task_id": _prop("string", _DESC_TASK_ID_DEFAULT)},
+    [],
+)
+
+KANBAN_CHECK_SCHEMA = _schema(
+    "kanban_check",
+    (
+        "Check off one checklist item as soon as it is really done. Check 'machine' "
+        "items (build/test/deploy) only after the command actually succeeded, with evidence."
+    ),
+    {
+        **_CHECKLIST_ITEM_PROPS,
+        "evidence": _prop("string", "Proof, <=500 chars: e.g. 'job:<id>', 'commit:<sha>', or the passing command."),
+    },
+    [],
+)
+
+KANBAN_UNCHECK_SCHEMA = _schema(
+    "kanban_uncheck",
+    "Uncheck a checklist item that turned out not to be done (clears its evidence).",
+    dict(_CHECKLIST_ITEM_PROPS),
+    [],
+)
+
 KANBAN_CREATE_SCHEMA = _schema(
     "kanban_create",
     (
@@ -468,6 +501,22 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "is blocked for review. Ignored unless goal_mode is "
                 "true. Defaults to the goal-engine default (20)."
         )),
+        "checklist": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["ai", "machine"]},
+                },
+                "required": ["text"],
+            },
+            "description": (
+                "Optional ordered checklist (3-8 typical, max 30) of concrete, verifiable "
+                "steps. kind 'machine' = build/test/deploy/type-check proven by a command; "
+                "'ai' (default) = implementation, investigation, design, judgement."
+            ),
+        },
         "model": _prop("string", (
                 "Pin the dispatched worker to this model instead of "
                 "the assignee profile's configured model. Use the "

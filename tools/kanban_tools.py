@@ -22,6 +22,7 @@ from hermes_cli.config import cfg_get, load_config
 from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_SCHEMA,
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
+    KANBAN_CHECK_SCHEMA, KANBAN_CHECKLIST_SCHEMA, KANBAN_UNCHECK_SCHEMA,
     KANBAN_COMPLETE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
     KANBAN_LIST_SCHEMA, KANBAN_REQUEST_CHANGES_SCHEMA, KANBAN_REQUEST_REVIEW_SCHEMA,
     KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA)
@@ -504,6 +505,8 @@ def _handle_show(args: dict, **kw) -> str:
             # Capped; full log via CLI.
             "events": [_fields(e, _EVENT_FIELDS) for e in kb.list_events(conn, tid)[-50:]],
             "runs": [_fields(r, _RUN_FIELDS) for r in kb.list_runs(conn, tid)],
+            # Items themselves are rendered inside worker_context.
+            "checklist_progress": _checklist_mod().progress(conn, tid),
             # Same string build_worker_context hands the dispatcher at spawn time.
             "worker_context": kb.build_worker_context(conn, tid)})
 
@@ -591,7 +594,11 @@ def _handle_complete(args: dict, **kw) -> str:
         _check(ok, (task.last_failure_error if task else None) or
                f"could not complete {tid} (unknown id, stale run, or already terminal)")
         run = kb.latest_run(conn, tid)
-        return _ok(task_id=tid, run_id=run.id if run else None)
+        progress = _checklist_mod().progress(conn, tid)
+        unchecked = progress["total"] - progress["done"]
+        # Completion is not blocked; the kernel noted the unchecked items on the card.
+        return _ok(task_id=tid, run_id=run.id if run else None,
+                   **({"unchecked_checklist_items": unchecked} if unchecked else {}))
 
 
 @_kanban_handler("kanban_block")
@@ -810,6 +817,64 @@ def _handle_attachments(args: dict, **kw) -> str:
                 _fields(a, _ATTACHMENT_FIELDS) for a in kb.list_attachments(conn, tid)]})
 
 
+def _checklist_mod():
+    from hermes_cli import kanban_db_checklist
+    return kanban_db_checklist
+
+
+_CHECKLIST_FIELDS = ("id", "position", "kind", "text", "done", "evidence")
+
+
+def _checklist_ref(args: dict) -> tuple[Optional[int], Optional[int]]:
+    item, item_id = args.get("item"), args.get("item_id")
+    _check((item is None) != (item_id is None), "pass exactly one of item (1-based position) or item_id")
+    try:
+        return (None if item is None else int(item)), (None if item_id is None else int(item_id))
+    except (TypeError, ValueError):
+        raise _Reject("item / item_id must be integers")
+
+
+def _checklist_payload(conn, tid: str, **extra: Any) -> str:
+    # ensure_ascii=False: non-ASCII item text would otherwise cost ~6 tokens per char.
+    return json.dumps({"ok": True, "task_id": tid, **extra,
+                       "progress": _checklist_mod().progress(conn, tid)}, ensure_ascii=False)
+
+
+@_kanban_handler("kanban_checklist")
+def _handle_checklist(args: dict, **kw) -> str:
+    """Checklist items + progress (read-only; no ownership restriction)."""
+    tid = _require_task_id(args)
+    with _board(args.get("board")) as (kb, conn):
+        _existing_task(kb, conn, tid)
+        items = _checklist_mod().list_items(conn, tid)
+        return _checklist_payload(conn, tid, items=[_fields(i, _CHECKLIST_FIELDS) for i in items])
+
+
+@_kanban_handler("kanban_check")
+def _handle_check(args: dict, **kw) -> str:
+    """Mark one checklist item done, with optional evidence."""
+    tid = _worker_guard("kanban_check", args)
+    position, item_id = _checklist_ref(args)
+    evidence = _redact_opt(args.get("evidence"))
+    with _board(args.get("board")) as (kb, conn):
+        item, changed = _checklist_mod().check_item(
+            conn, tid, position=position, item_id=item_id,
+            done_by=os.environ.get("HERMES_PROFILE") or "worker", evidence=evidence)
+        return _checklist_payload(conn, tid, item=_fields(item, _CHECKLIST_FIELDS), changed=changed)
+
+
+@_kanban_handler("kanban_uncheck")
+def _handle_uncheck(args: dict, **kw) -> str:
+    """Clear one checklist item's done state."""
+    tid = _worker_guard("kanban_uncheck", args)
+    position, item_id = _checklist_ref(args)
+    with _board(args.get("board")) as (kb, conn):
+        item, changed = _checklist_mod().uncheck_item(
+            conn, tid, position=position, item_id=item_id,
+            author=os.environ.get("HERMES_PROFILE") or "worker")
+        return _checklist_payload(conn, tid, item=_fields(item, _CHECKLIST_FIELDS), changed=changed)
+
+
 @_kanban_handler("kanban_create")
 def _handle_create(args: dict, **kw) -> str:
     """Create a (child) task; orchestrator workers use this to fan out."""
@@ -859,6 +924,7 @@ def _handle_create(args: dict, **kw) -> str:
             goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
             completion_contract=args.get("completion_contract"),
             initial_status=str(args.get("initial_status") or "running"),
+            checklist=args.get("checklist"),
             created_by=os.environ.get("HERMES_PROFILE") or "worker", session_id=session_id)
         landed = _fields(kb.get_task(conn, new_tid), _CREATED_FIELDS)
         return _ok(task_id=new_tid, **landed, subscribed=_maybe_auto_subscribe(conn, new_tid))
@@ -982,6 +1048,9 @@ _TOOLS = (
     ("kanban_attach", KANBAN_ATTACH_SCHEMA, _handle_attach, "📎"),
     ("kanban_attach_url", KANBAN_ATTACH_URL_SCHEMA, _handle_attach_url, "📎"),
     ("kanban_attachments", KANBAN_ATTACHMENTS_SCHEMA, _handle_attachments, "📎"),
+    ("kanban_checklist", KANBAN_CHECKLIST_SCHEMA, _handle_checklist, "☑"),
+    ("kanban_check", KANBAN_CHECK_SCHEMA, _handle_check, "☑"),
+    ("kanban_uncheck", KANBAN_UNCHECK_SCHEMA, _handle_uncheck, "☐"),
     ("kanban_create", KANBAN_CREATE_SCHEMA, _handle_create, "➕"),
     ("kanban_unblock", KANBAN_UNBLOCK_SCHEMA, _handle_unblock, "▶"),
     ("kanban_link", KANBAN_LINK_SCHEMA, _handle_link, "🔗"))

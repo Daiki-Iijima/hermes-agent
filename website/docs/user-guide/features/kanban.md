@@ -244,6 +244,39 @@ sandbox so the absolute paths in the worker context are reachable.
 :::
 
 
+## Checklists
+
+A task can carry an ordered checklist (max 30 items, 300 chars each). Each item
+is tagged `ai` (implementation, investigation, design, judgement) or `machine`
+(build, test, type-check, deploy — a step a command proves). Rows live in the
+`task_checklist_items` table of `kanban.db`; the table is created by the normal
+`CREATE TABLE IF NOT EXISTS` schema pass, so existing boards upgrade on their next
+connect.
+
+```bash
+hermes kanban create "Fix login" --checklist "ai:find the cause" --checklist "machine:pytest tests/auth"
+hermes kanban checklist <task_id> [--json]          # items + {total, done, ai, machine}
+hermes kanban checklist add <task_id> "text" [--kind ai|machine] [--position N]
+hermes kanban checklist check <task_id> <N|id:ID> [--evidence commit:<sha>] [--author ...]
+hermes kanban checklist uncheck <task_id> <N|id:ID>
+hermes kanban checklist set <task_id> --item "ai:..." --item "machine:..."   # replace
+```
+
+`set` keeps the done state of items whose text and kind are unchanged. `show --json`
+adds `checklist` and `checklist_progress`; `list --json` adds `checklist_progress` per
+task. Workers use `kanban_checklist`, `kanban_check(item=N, evidence=...)` and
+`kanban_uncheck`, and `kanban_create` accepts `checklist=[{"text", "kind"}]`. The
+worker context renders the list with `[x]`/`[ ]` marks so a resumed worker continues
+from the first unchecked item. The triage specifier and decomposer ask the auxiliary
+model for 3-8 items per task and skip missing or malformed checklists with a warning.
+
+**Completion rule.** Completing a task with unchecked items is not blocked (review
+approval, dashboard completion and existing automation keep working). Instead the
+completion records a `checklist_incomplete` event listing the remaining items and
+adds a `kanban`-authored comment; `kanban_complete` returns
+`unchecked_checklist_items` and the CLI prints the count.
+
+
 ## Quick start
 
 The commands below are **you** (the human) setting up the board and creating tasks. Once a task is assigned, the dispatcher spawns the assigned profile as a worker, and from there **the model drives the task through `kanban_*` tool calls, not CLI commands** — see [How workers interact with the board](#how-workers-interact-with-the-board).
@@ -1227,6 +1260,10 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 | `edited` | `{fields}` | Title or body updated. |
 | `reprioritized` | `{priority}` | Priority changed. |
 | `status` | `{status}` | Dashboard drag-drop wrote a status directly (e.g. `todo → ready`). Carries the `run_id` of the run that was reclaimed when dragging off `running`; otherwise `run_id` is NULL. |
+| `checklist_added` | `{count, total, position?, by}` | Checklist items added (on create, decompose/specify, or `checklist add`). |
+| `checklist_set` | `{total, kept_done, by}` | Checklist replaced with `checklist set`. |
+| `checklist_checked` / `checklist_unchecked` | `{item_id, position, kind, text, by, evidence?}` | One item checked (or its evidence updated) / unchecked. |
+| `checklist_incomplete` | `{remaining, items}` | Task completed while items were still unchecked; carries the completion `run_id`. |
 
 **Worker telemetry** (about the execution process, not the logical task):
 

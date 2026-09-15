@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from hermes_cli import kanban_db as kb
+from hermes_cli.kanban_db_checklist import lenient_items
 from hermes_cli.kanban_db_graph import decompose_triage_task
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import profiles as profiles_mod
@@ -56,7 +57,8 @@ Output a single JSON object with this exact shape:
         "title": "<concrete task title, imperative voice, <= 80 chars>",
         "body":  "<detailed spec for the worker on this child task>",
         "assignee": "<profile name from the roster, or null for default>",
-        "parents": [<int>, ...]
+        "parents": [<int>, ...],
+        "checklist": [{"text": "<one concrete, verifiable step>", "kind": "ai" | "machine"}, ...]
       },
       ...
     ]
@@ -78,6 +80,11 @@ Rules:
   - Write every "title" and "body" in the same natural language as the
     original task (a Japanese request gets Japanese titles and bodies).
     Keep code identifiers, file paths, commands and library names as-is.
+  - Give every task a "checklist" of 3-8 concrete, verifiable steps in
+    execution order, written in the same language as the original task.
+    kind "machine" = a mechanical step whose success a command proves
+    (build, test run, type-check, deploy, screenshot capture); kind "ai" =
+    implementation, investigation, design or judgement.
 
 When the task is genuinely a single unit of work (no useful decomposition),
 return:
@@ -87,7 +94,8 @@ return:
     "rationale": "<one sentence>",
     "title": "<tightened title>",
     "body":  "<concrete spec for a single worker>",
-    "assignee": "<profile name from the roster, or null for default>"
+    "assignee": "<profile name from the roster, or null for default>",
+    "checklist": [{"text": "<one concrete, verifiable step>", "kind": "ai" | "machine"}, ...]
   }
 
 In that case the task stays as one work item, just with a tightened spec and
@@ -228,9 +236,11 @@ def _apply_single(task: kb.Task, parsed: dict, routing: _Routing, author: str) -
         )
     if title_val is None and body_val is None:
         return DecomposeOutcome(task.id, False, "decomposer returned fanout=false with no title/body")
+    checklist = lenient_items(parsed.get("checklist"), context=f"decompose {task.id}")
     with kbc.connect_closing() as conn:
         ok = kb.specify_triage_task(
             conn, task.id, title=title_val, body=body_val, assignee=assignee_val, author=author,
+            checklist=checklist,
         )
     if not ok:
         return DecomposeOutcome(task.id, False, "task moved out of triage before promotion")
@@ -267,6 +277,8 @@ def _clean_children(task_id: str, raw_tasks: list, routing: _Routing) -> tuple[l
             "assignee": chosen,
             # Drop non-int, out-of-range and self parent indices.
             "parents": [p for p in parents if isinstance(p, int) and 0 <= p < len(raw_tasks) and p != idx],
+            # Invalid/missing checklist entries are skipped with a warning, never fatal.
+            "checklist": lenient_items(entry.get("checklist"), context=f"decompose {task_id} tasks[{idx}]"),
         })
     return children, ""
 

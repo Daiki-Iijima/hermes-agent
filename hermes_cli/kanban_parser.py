@@ -174,6 +174,10 @@ _SPECS = [
              help="Skill to force-load into the worker (repeatable). The kanban "
                   "lifecycle is already injected automatically. Example: --skill "
                   "translation --skill github-code-review"),
+        _arg("--checklist", action="append", default=[], metavar="KIND:TEXT",
+             help="Checklist item (repeatable, in order). KIND is 'ai' (implementation/investigation/"
+                  "judgement) or 'machine' (build/test/deploy); a bare TEXT means ai. "
+                  "Example: --checklist 'ai:実装する' --checklist 'machine:pytest を通す'"),
         _arg("--max-retries", type=int, metavar="N",
              help="Per-task override for the consecutive-failure "
                   f"circuit breaker. Trip on the Nth failure — e.g. --max-retries 1 blocks on the "
@@ -276,6 +280,25 @@ _SPECS = [
     ], help="Attach a local file to a task"),
     _cmd("attachments", [_TASK_ID, _json_flag()], help="List a task's attachments"),
     _cmd("attach-rm", [_arg("attachment_id", type=int)], help="Delete an attachment by id"),
+    _cmd("checklist", [
+        _arg("target", metavar="TASK_ID|VERB",
+             help="A task id to list its checklist, or a verb: add | check | uncheck | set"),
+        _arg("task_id", nargs="?", help="Task id (when a verb is given)"),
+        _arg("words", nargs="*", metavar="ARG",
+             help="add: item text; check/uncheck: 1-based position N or id:<item_id>"),
+        _arg("--kind", choices=("ai", "machine"), default="ai", help="add: item kind (default: ai)"),
+        _arg("--position", type=int, metavar="N", help="add: insert before this 1-based position (default: append)"),
+        _arg("--evidence", help="check: proof such as job:<id>, commit:<sha>, or free text (<= 500 chars)"),
+        _arg("--author", help="Recorded as done_by / event author (default: $HERMES_PROFILE or 'user')"),
+        _arg("--item", action="append", default=[], dest="items", metavar="KIND:TEXT",
+             help="set: replacement item, repeatable in order (checked items with identical text stay checked)"),
+        _json_flag(),
+    ], help="List or edit a task's checklist (progress, add, check, uncheck, set)", description=(
+        "hermes kanban checklist <task_id> [--json] lists items + progress. "
+        "hermes kanban checklist add <task_id> \"text\" [--kind ai|machine] [--position N]; "
+        "check <task_id> <N|id:ID> [--evidence ...] [--author ...]; uncheck <task_id> <N|id:ID>; "
+        "set <task_id> --item 'ai:text' --item 'machine:text' ... replaces the list."
+    )),
     _cmd("complete", [
         _arg("task_ids", nargs="+", help="One or more task ids (only --result applies to all of them)"),
         _arg("--result", help="Result summary"),

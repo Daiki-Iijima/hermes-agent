@@ -34,12 +34,18 @@ A user dropped a rough idea into the Triage column. Your job is to turn it
 into a concrete, actionable task spec that an autonomous worker can pick up
 and execute without further clarification.
 
-Output a single JSON object with exactly two keys:
+Output a single JSON object with exactly three keys:
 
   {
     "title": "<tightened task title, <= 80 chars, imperative voice>",
-    "body":  "<multi-line spec, see structure below>"
+    "body":  "<multi-line spec, see structure below>",
+    "checklist": [{"text": "<one concrete, verifiable step>", "kind": "ai" | "machine"}, ...]
   }
+
+"checklist" holds 3-8 concrete, verifiable steps in execution order.
+kind "machine" = a mechanical step whose success a command proves (build,
+test run, type-check, deploy, screenshot capture); kind "ai" =
+implementation, investigation, design or judgement.
 
 The body MUST include these sections, each prefixed with a bold markdown
 heading, in this order:
@@ -56,7 +62,7 @@ Rules:
   - If the original idea is already detailed, preserve its substance and
     just reformat into the sections above.
   - Never add invented requirements the user didn't hint at.
-  - Write every "title" and "body" in the same natural language as the
+  - Write every "title", "body" and checklist "text" in the same natural language as the
     original task (a Japanese request gets a Japanese title and body;
     the section headings may be translated too).
     Keep code identifiers, file paths, commands and library names as-is.
@@ -212,6 +218,7 @@ def specify_task(
     raw = raw.strip()
 
     parsed = _extract_json_blob(raw)
+    checklist: list = []
     if parsed is None:
         # Whole reply becomes the body; the user can edit afterward.
         if not raw:
@@ -221,6 +228,8 @@ def specify_task(
         new_title, new_body = _title_body(parsed)
         if new_body is None and new_title is None:
             return SpecifyOutcome(task_id, False, "LLM response missing title and body")
+        from hermes_cli.kanban_db_checklist import lenient_items
+        checklist = lenient_items(parsed.get("checklist"), context=f"specify {task_id}")
 
     with kbc.connect_closing() as conn:
         ok = kb.specify_triage_task(
@@ -229,6 +238,7 @@ def specify_task(
             title=new_title,
             body=new_body,
             author=author or _profile_author(),
+            checklist=checklist,
         )
     if not ok:
         # Race: promoted/archived between our read and the write.

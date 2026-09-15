@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_checklist as kbcl
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
@@ -231,6 +232,9 @@ def _is_delegated_child_cli_mutation(args: argparse.Namespace) -> bool:
     if action == "boards":
         if (getattr(args, "boards_action", None) or "list") not in _DELEGATED_CHILD_DENIED_BOARD_ACTIONS:
             return False
+    elif action == "checklist":
+        if getattr(args, "target", None) not in _CHECKLIST_MUTATING_VERBS:
+            return False
     elif action not in _DELEGATED_CHILD_DENIED_ACTIONS:
         return False
     try:
@@ -376,6 +380,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             initial_status=getattr(args, "initial_status", "running"),
             creator_task_id=(os.environ.get("HERMES_KANBAN_TASK")
                              if is_dispatcher_owned_worker_context() else None),
+            checklist=getattr(args, "checklist", None) or None,
         )
         task = kb.get_task(conn, task_id)
     if getattr(args, "json", False):
@@ -427,8 +432,11 @@ def _cmd_list(args: argparse.Namespace) -> int:
             include_archived=args.archived, order_by=getattr(args, "sort", None),
             workflow_template_id=args.workflow_template_id, current_step_key=args.current_step_key,
         )
-    if _json_out(args, [_task_to_dict(t) for t in tasks]):
-        return 0
+        # One grouped query, only for --json (the text listing stays checklist-free).
+        if getattr(args, "json", False):
+            progress = kbcl.progress_for_tasks(conn, [t.id for t in tasks])
+            _print_json([{**_task_to_dict(t), "checklist_progress": progress[t.id]} for t in tasks])
+            return 0
     # Passive discoverability: only multi-board users see which board this is.
     try:
         all_boards = kb.list_boards(include_archived=False)
@@ -487,12 +495,15 @@ def _cmd_show(args: argparse.Namespace) -> int:
         runs = kb.list_runs(conn, args.task_id, **rsk)
         # Workers hand off via task_runs.summary; tasks.result stays NULL unless set.
         latest_summary = kb.latest_summary(conn, args.task_id)
+        checklist = kbcl.list_items(conn, args.task_id)
+        checklist_progress = kbcl.progress(conn, args.task_id)
         if not want_json:
             graph = kb.task_graph_context(conn, task.id)
 
     if want_json:
         _print_json({
             "task": _task_to_dict(task), "latest_summary": latest_summary, "parents": parents, "children": children,
+            "checklist": [i.to_dict() for i in checklist], "checklist_progress": checklist_progress,
             "comments": [_obj_dict(c, ("author", "body", "created_at")) for c in comments],
             "events": [_obj_dict(e, ("kind", "payload", "created_at", "run_id")) for e in events],
             "runs": [_obj_dict(r, _SHOW_RUN_FIELDS) for r in runs],
@@ -542,6 +553,9 @@ def _cmd_show(args: argparse.Namespace) -> int:
         field("children", ", ".join(children))
     if task.body:
         _print_section("Body:", [task.body])
+    if checklist:
+        _print_section(f"Checklist ({checklist_progress['done']}/{checklist_progress['total']} done):",
+                       kbcl.render_human_lines(checklist))
     if task.result:
         _print_section("Result:", [task.result])
     elif latest_summary:
@@ -883,7 +897,82 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             return kb.complete_task(conn, tid, result=args.result, summary=summary, metadata=metadata,
                                     expected_run_id=_worker_run_id_for(tid))
 
-        return _bulk_apply(ids, op, lambda tid: f"Completed {tid}", fail_msg.__getitem__)
+        def ok_msg(tid):
+            p = kbcl.progress(conn, tid)
+            left = p["total"] - p["done"]
+            return f"Completed {tid}" + (f" ({left} checklist item(s) left unchecked — noted on the card)"
+                                         if left else "")
+
+        return _bulk_apply(ids, op, ok_msg, fail_msg.__getitem__)
+
+
+_CHECKLIST_MUTATING_VERBS = frozenset({"add", "check", "uncheck", "set"})
+
+
+def _checklist_item_ref(words) -> tuple[Optional[int], Optional[int]]:
+    """``N`` -> (position, None); ``id:<n>`` -> (None, item_id). ValueError otherwise."""
+    raw = " ".join(words or []).strip()
+    try:
+        if raw.lower().startswith("id:"):
+            return None, int(raw[3:])
+        return int(raw), None
+    except ValueError:
+        raise ValueError(f"expected a 1-based position N or id:<item_id>, got {raw!r}") from None
+
+
+def _print_checklist(args: argparse.Namespace, conn, tid: str, header: Optional[str] = None) -> None:
+    items = kbcl.list_items(conn, tid)
+    prog = kbcl.progress(conn, tid)
+    if _json_out(args, {"task_id": tid, "items": [i.to_dict() for i in items], "progress": prog}):
+        return
+    if header:
+        print(header)
+    if not items:
+        print(f"(no checklist on {tid})")
+        return
+    print(f"Checklist for {tid} ({prog['done']}/{prog['total']} done; "
+          f"AI {prog['ai']['done']}/{prog['ai']['total']}, "
+          f"機械 {prog['machine']['done']}/{prog['machine']['total']}):")
+    for line in kbcl.render_human_lines(items):
+        print(line)
+
+
+def _cmd_checklist(args: argparse.Namespace) -> int:
+    verb = args.target if args.target in _CHECKLIST_MUTATING_VERBS else None
+    tid = args.task_id if verb else args.target
+    if verb is None and (args.task_id or args.words):
+        return _err(f"kanban checklist: unknown verb {args.target!r} (use add | check | uncheck | set)", 2)
+    if not tid:
+        return _err(f"kanban checklist {verb}: task_id is required", 2)
+    author = args.author or _profile_author()
+    with kbc.connect_closing() as conn:
+        if verb is None:
+            if kb.get_task(conn, tid) is None:
+                return _err(f"no such task: {tid}")
+            _print_checklist(args, conn, tid)
+            return 0
+        _worker_run_id_for(tid)  # a worker may only edit its own task's checklist
+        if verb == "add":
+            text = " ".join(args.words).strip()
+            if not text:
+                return _err("kanban checklist add: item text is required", 2)
+            kbcl.add_items(conn, tid, [{"text": text, "kind": args.kind}], position=args.position, author=author)
+            header = f"Added checklist item to {tid}"
+        elif verb == "set":
+            if not args.items:
+                return _err("kanban checklist set: pass at least one --item KIND:TEXT", 2)
+            kbcl.set_items(conn, tid, args.items, author=author)
+            header = f"Replaced checklist on {tid}"
+        else:
+            position, item_id = _checklist_item_ref(args.words)
+            if verb == "check":
+                item, changed = kbcl.check_item(conn, tid, position=position, item_id=item_id,
+                                                done_by=author, evidence=args.evidence)
+            else:
+                item, changed = kbcl.uncheck_item(conn, tid, position=position, item_id=item_id, author=author)
+            header = f"{verb.capitalize()}ed #{item.position} on {tid}" + ("" if changed else " (no change)")
+        _print_checklist(args, conn, tid, header)
+    return 0
 
 
 def _cmd_edit(args: argparse.Namespace) -> int:
@@ -1237,7 +1326,7 @@ _HANDLERS = {
     "diagnostics": _cmd_diagnostics, "diag": _cmd_diagnostics,
     "link": _cmd_link, "unlink": _cmd_unlink, "claim": _cmd_claim,
     "comment": _cmd_comment, "attach": _cmd_attach,
-    "attachments": _cmd_attachments, "attach-rm": _cmd_attach_rm,
+    "attachments": _cmd_attachments, "attach-rm": _cmd_attach_rm, "checklist": _cmd_checklist,
     "complete": _cmd_complete, "edit": _cmd_edit, "block": _cmd_block,
     "schedule": _cmd_schedule, "unblock": _cmd_unblock,
     "request-review": _cmd_request_review, "request-changes": _cmd_request_changes,
