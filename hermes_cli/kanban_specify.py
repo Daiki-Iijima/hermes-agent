@@ -56,6 +56,10 @@ Rules:
   - If the original idea is already detailed, preserve its substance and
     just reformat into the sections above.
   - Never add invented requirements the user didn't hint at.
+  - Write every "title" and "body" in the same natural language as the
+    original task (a Japanese request gets a Japanese title and body;
+    the section headings may be translated too).
+    Keep code identifiers, file paths, commands and library names as-is.
   - No preamble, no closing remarks, no code fences around the JSON.
   - Output only the JSON object and nothing else.
 """

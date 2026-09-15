@@ -5356,8 +5356,8 @@ def _schedule_async_close(close_result: Any, client: Any) -> None:
 
 def _close_cached_client(client: Any, *, close_async: bool = False) -> None:
     """Close one cached client, awaiting async transports only when safe."""
-    if client is None:
-        return
+    if client is None or isinstance(client, _AuxProbeClientStub):
+        return  # a probe stub owns no transport; touching it raises
     close_fn = getattr(client, "close", None)
     if not callable(close_fn):
         _force_close_async_httpx(client)
@@ -5469,6 +5469,11 @@ def _get_cached_client(
         provider, model, async_mode, explicit_base_url=base_url, explicit_api_key=effective_api_key,
         api_mode=api_mode, main_runtime=runtime, is_vision=is_vision, task=task,
     )
+    if client is not None and _aux_probe_active():
+        # Backport of upstream #87654: availability probes must leave the cache untouched. A cached
+        # probe stub is served to later callers, and closing it during eviction raises
+        # "_AuxProbeClientStub used as a real client (attribute 'close')" on every aux call.
+        return client, model or default_model
     if client is not None:
         with _client_cache_lock:
             if cache_key not in _client_cache:

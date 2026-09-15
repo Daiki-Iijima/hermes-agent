@@ -75,6 +75,9 @@ Rules:
     and the system will route to the default_assignee.
   - Each child task body is what a fresh worker will read with no other
     context — be specific about goal, approach, and acceptance criteria.
+  - Write every "title" and "body" in the same natural language as the
+    original task (a Japanese request gets Japanese titles and bodies).
+    Keep code identifiers, file paths, commands and library names as-is.
 
 When the task is genuinely a single unit of work (no useful decomposition),
 return:
