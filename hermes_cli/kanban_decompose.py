@@ -85,6 +85,12 @@ Rules:
     kind "machine" = a mechanical step whose success a command proves
     (build, test run, type-check, deploy, screenshot capture); kind "ai" =
     implementation, investigation, design or judgement.
+  - Never emit a sub-task whose only job is refreshing screen catalogs,
+    screenshots, architecture diagrams or similar generated documentation.
+    That work is mechanical: give the sub-task that changes the UI a
+    checklist item of kind "machine" that runs the refresh command named in
+    the task body (e.g. `hermes-worker refresh --app <app id> --card <task id>`),
+    and leave to the "ai" side only describing newly added screens.
 
 When the task is genuinely a single unit of work (no useful decomposition),
 return:
