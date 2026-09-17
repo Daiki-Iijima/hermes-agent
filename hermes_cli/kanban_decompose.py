@@ -91,6 +91,12 @@ Rules:
     checklist item of kind "machine" that runs the refresh command named in
     the task body (e.g. `hermes-worker refresh --app <app id> --card <task id>`),
     and leave to the "ai" side only describing newly added screens.
+    This also covers combined sub-tasks such as "deploy + update the screen
+    catalog + rebuild the architecture diagram": fold the deploy into the
+    implementation sub-task (or a deploy-only machine item) and drop the
+    catalog/diagram part. Do not emit checklist items that run archify,
+    re-shoot every screen, or "verify the catalog was updated" -- the refresh
+    command already does that and reports its own result.
 
 When the task is genuinely a single unit of work (no useful decomposition),
 return:
